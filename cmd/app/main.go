@@ -17,12 +17,6 @@ import (
 	_ "github.com/lib/pq"
 )
 
-// type noopPublisher struct{}
-
-// func (p *noopPublisher) PublishEvent(ctx context.Context, event domain.Event) error {
-// 	return nil
-// }
-
 func main() {
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
