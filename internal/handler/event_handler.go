@@ -1,13 +1,12 @@
 package handler
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
+	"path"
 	"rabbitmq-notification-service/internal/repository"
 	"rabbitmq-notification-service/internal/response"
 	"rabbitmq-notification-service/internal/service"
-	"strings"
 	"time"
 
 	"github.com/go-playground/validator/v10"
@@ -34,7 +33,7 @@ func NewEventHandler(
 func (h *EventHandler) CreateEvent(w http.ResponseWriter, r *http.Request) {
 	var req CreateEventRequest
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		response.WriteError(
 			w,
 			http.StatusBadRequest,
@@ -169,7 +168,7 @@ func (h *EventHandler) ListEvents(w http.ResponseWriter, r *http.Request) {
 
 // GetEventDetails обрабатывает запрос на получение детальной информации о событии.
 func (h *EventHandler) GetEventDetails(w http.ResponseWriter, r *http.Request) {
-	eventID := strings.TrimPrefix(r.URL.Path, "/api/events/")
+	eventID := path.Base(r.URL.Path)
 	userID := r.URL.Query().Get("user_id")
 
 	req := EventDetailsRequest{

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"rabbitmq-notification-service/internal/correlation"
+	"rabbitmq-notification-service/internal/domain"
 	"sync"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -14,7 +15,7 @@ import (
 
 // NotificationHandler описывает обработчик уведомлений, вызываемый RabbitMQ consumer.
 type NotificationHandler interface {
-	HandleNotification(ctx context.Context, eventID string) error
+	HandleNotification(ctx context.Context, eventID string) (domain.NotificationResult, error)
 }
 
 type rabbitConsumer struct {
@@ -115,6 +116,10 @@ func (c *rabbitConsumer) consumeLoop(ctx context.Context) error {
 		return fmt.Errorf("rabbitmq consumer channel is nil")
 	}
 
+	if err := ch.Qos(10, 0, false); err != nil {
+		return fmt.Errorf("set rabbitmq qos: %w", err)
+	}
+
 	deliveries, err := ch.Consume(
 		notificationsQueue,
 		"",
@@ -189,20 +194,23 @@ func (c *rabbitConsumer) handleDelivery(ctx context.Context, delivery amqp.Deliv
 		message.EventID,
 	)
 
-	if err := c.handler.HandleNotification(ctx, message.EventID); err != nil {
+	result, err := c.handler.HandleNotification(ctx, message.EventID)
+	if err != nil {
 		log.Printf(
-			"correlation_id=%s handle notification event_id=%s: %v",
+			"correlation_id=%s handle notification event_id=%s retryable=%t: %v",
 			correlationID,
 			message.EventID,
+			result.Retryable,
 			err,
 		)
 
-		if err := delivery.Nack(false, false); err != nil {
+		if nackErr := delivery.Nack(false, result.Retryable); nackErr != nil {
 			log.Printf(
-				"correlation_id=%s nack message event_id=%s: %v",
+				"correlation_id=%s nack message event_id=%s requeue=%t: %v",
 				correlationID,
 				message.EventID,
-				err,
+				result.Retryable,
+				nackErr,
 			)
 		}
 

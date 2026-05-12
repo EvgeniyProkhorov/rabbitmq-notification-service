@@ -31,7 +31,7 @@ func CorrelationMiddleware(next http.Handler) http.Handler {
 		w.Header().Set(correlation.HeaderName, correlationID)
 
 		ctx := correlation.WithID(r.Context(), correlationID)
-		r.WithContext(ctx)
+		r = r.WithContext(ctx)
 
 		wrappedWriter := &statusResponseWriter{
 			ResponseWriter: w,

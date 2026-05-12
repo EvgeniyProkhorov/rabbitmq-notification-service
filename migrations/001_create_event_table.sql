@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_user_id 
 ON events(user_id);
-CREATE INDEX IF NOT EXISTS idx_events_status 
-ON events(status);
+CREATE INDEX IF NOT EXISTS idx_events_status_created_at
+ON events(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_events_user_filters 
 ON events(user_id, event_type, status);

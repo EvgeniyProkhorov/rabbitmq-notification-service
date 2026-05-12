@@ -7,5 +7,6 @@ import (
 
 // Publisher описывает контракт публикации событий во внешний брокер сообщений.
 type Publisher interface {
-	PublishEvent(ctx context.Context, event domain.Event) error
+	BuildOutboxMessage(event domain.Event) (domain.OutboxMessage, error)
+	PublishOutboxMessage(ctx context.Context, message domain.OutboxMessage) error
 }

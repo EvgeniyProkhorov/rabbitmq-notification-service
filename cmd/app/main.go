@@ -3,21 +3,30 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"rabbitmq-notification-service/internal/broker"
 	"rabbitmq-notification-service/internal/handler"
 	"rabbitmq-notification-service/internal/repository"
 	"rabbitmq-notification-service/internal/scheduler"
 	"rabbitmq-notification-service/internal/service"
 	"rabbitmq-notification-service/internal/validation"
+	"sort"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
 )
 
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
 		log.Fatal("DATABASE_URL is required")
@@ -33,14 +42,16 @@ func main() {
 		log.Fatalf("ping database: %v", err)
 	}
 
+	if err := runMigrations(ctx, db, "migrations"); err != nil {
+		log.Fatalf("run migrations: %v", err)
+	}
+
 	eventRepo := repository.NewPostgresEventRepository(db)
 
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		log.Fatal("RABBITMQ_URL is required")
 	}
-
-	ctx := context.Background()
 
 	rabbitPublisher, err := broker.NewRabbitPublisher(ctx, rabbitURL)
 	if err != nil {
@@ -69,11 +80,63 @@ func main() {
 
 	router := handler.NewRouter(eventHandler)
 
-	addr := ":8080"
-
-	log.Printf("server listening on %s", addr)
-
-	if err := http.ListenAndServe(addr, router); err != nil {
-		log.Fatalf("listen and serve: %v", err)
+	server := &http.Server{
+		Addr:    ":8080",
+		Handler: router,
 	}
+
+	go func() {
+		log.Printf("server listening on %s", server.Addr)
+
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("listen and serve: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("shutdown server: %v", err)
+	}
+
+	log.Println("server stopped")
+}
+
+func runMigrations(ctx context.Context, db *sql.DB, dir string) error {
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("read migrations dir: %w", err)
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name() < files[j].Name()
+	})
+
+	for _, file := range files {
+		if file.IsDir() {
+			continue
+		}
+
+		if filepath.Ext(file.Name()) != ".sql" {
+			continue
+		}
+
+		path := filepath.Join(dir, file.Name())
+
+		query, err := os.ReadFile(path)
+		if err != nil {
+			return fmt.Errorf("read migration %s: %w", file.Name(), err)
+		}
+
+		if _, err := db.ExecContext(ctx, string(query)); err != nil {
+			return fmt.Errorf("execute migration %s: %w", file.Name(), err)
+		}
+
+		log.Printf("migration applied: %s", file.Name())
+	}
+
+	return nil
 }

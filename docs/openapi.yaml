@@ -205,7 +205,7 @@ components:
           example: 8c5a3bc0-5221-4641-80f5-5a6d56562dc9
         status:
           type: string
-          example: queued
+          example: pending
 
     EventListItem:
       type: object

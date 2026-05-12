@@ -33,7 +33,7 @@ type EventListItemResponse struct {
 }
 
 type EventDetailsRequest struct {
-	EventID string `path:"event_id" validate:"required"`
+	EventID string `path:"event_id" validate:"required,uuid"`
 	UserID  string `query:"user_id" validate:"required"`
 }
 

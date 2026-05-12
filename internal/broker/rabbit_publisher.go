@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/google/uuid"
 	amqp "github.com/rabbitmq/amqp091-go"
 
 	"rabbitmq-notification-service/internal/domain"
@@ -89,40 +90,7 @@ func (p *rabbitPublisher) reconnect(ctx context.Context) error {
 	return nil
 }
 
-// PublishEvent публикует событие заказа в RabbitMQ.
-func (p *rabbitPublisher) PublishEvent(ctx context.Context, event domain.Event) error {
-	message := eventMessage{
-		EventID:   event.EventID,
-		UserID:    event.UserID,
-		OrderID:   event.OrderID,
-		EventType: string(event.EventType),
-		Payload:   event.Payload,
-	}
-
-	body, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("marshal event message: %w", err)
-	}
-
-	routingKey := fmt.Sprintf("order.%s", event.EventType)
-
-	publishErr := p.publish(ctx, routingKey, body)
-	if publishErr == nil {
-		return nil
-	}
-
-	if err := p.reconnect(ctx); err != nil {
-		return fmt.Errorf("publish event %s failed: %v; reconnect failed: %w", event.EventID, publishErr, err)
-	}
-
-	if err := p.publish(ctx, routingKey, body); err != nil {
-		return fmt.Errorf("publish event %s after reconnect: %w", event.EventID, err)
-	}
-
-	return nil
-}
-
-func (p *rabbitPublisher) publish(ctx context.Context, routingKey string, body []byte) error {
+func (p *rabbitPublisher) publish(ctx context.Context, exchange string, routingKey string, body []byte) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -132,7 +100,7 @@ func (p *rabbitPublisher) publish(ctx context.Context, routingKey string, body [
 
 	if err := p.channel.PublishWithContext(
 		ctx,
-		ordersExchange,
+		exchange,
 		routingKey,
 		false,
 		false,
@@ -143,6 +111,50 @@ func (p *rabbitPublisher) publish(ctx context.Context, routingKey string, body [
 		},
 	); err != nil {
 		return fmt.Errorf("publish event message: %w", err)
+	}
+
+	return nil
+}
+
+// BuildOutboxMessage создаёт outbox-сообщение для последующей публикации события в RabbitMQ.
+func (p *rabbitPublisher) BuildOutboxMessage(event domain.Event) (domain.OutboxMessage, error) {
+	message := eventMessage{
+		EventID:   event.EventID,
+		UserID:    event.UserID,
+		OrderID:   event.OrderID,
+		EventType: string(event.EventType),
+		Payload:   event.Payload,
+	}
+
+	body, err := json.Marshal(message)
+	if err != nil {
+		return domain.OutboxMessage{}, fmt.Errorf("marshal outbox message: %w", err)
+	}
+
+	return domain.OutboxMessage{
+		ID:         uuid.NewString(),
+		EventID:    event.EventID,
+		Exchange:   ordersExchange,
+		RoutingKey: fmt.Sprintf("order.%s", event.EventType),
+		Payload:    body,
+		Status:     domain.OutboxStatusPending,
+		Attempts:   0,
+	}, nil
+}
+
+// PublishOutboxMessage публикует подготовленное outbox-сообщение в RabbitMQ.
+func (p *rabbitPublisher) PublishOutboxMessage(ctx context.Context, message domain.OutboxMessage) error {
+	publishErr := p.publish(ctx, message.Exchange, message.RoutingKey, message.Payload)
+	if publishErr == nil {
+		return nil
+	}
+
+	if err := p.reconnect(ctx); err != nil {
+		return fmt.Errorf("publish outbox message %s failed: %v; reconnect failed: %w", message.ID, publishErr, err)
+	}
+
+	if err := p.publish(ctx, message.Exchange, message.RoutingKey, message.Payload); err != nil {
+		return fmt.Errorf("publish outbox message %s after reconnect: %w", message.ID, err)
 	}
 
 	return nil

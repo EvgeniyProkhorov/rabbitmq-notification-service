@@ -16,8 +16,10 @@ import (
 )
 
 const (
-	pendingBatchLimit = 10
-	maxAttempts       = 3
+	pendingBatchLimit    = 10
+	maxAttempts          = 3
+	maxOutboxAttempts    = 3
+	outboxPublishTimeout = 5 * time.Second
 )
 
 type CreateEventInput struct {
@@ -75,7 +77,7 @@ type EventService interface {
 	ListEvents(ctx context.Context, input ListEventsInput) (ListEventsOutput, error)
 	GetEventDetails(ctx context.Context, input GetEventDetailsInput) (GetEventDetailsOutput, error)
 	ProcessPendingEvents(ctx context.Context) error
-	HandleNotification(ctx context.Context, eventID string) error
+	HandleNotification(ctx context.Context, eventID string) (domain.NotificationResult, error)
 }
 
 type eventService struct {
@@ -94,6 +96,7 @@ func NewEventService(
 	}
 }
 
+// CreateEvent регистрирует событие заказа и создаёт outbox-сообщение для публикации.
 func (s *eventService) CreateEvent(ctx context.Context, input CreateEventInput) (CreateEventOutput, error) {
 	eventID := uuid.NewString()
 
@@ -108,11 +111,16 @@ func (s *eventService) CreateEvent(ctx context.Context, input CreateEventInput) 
 		ErrorMessage: nil,
 	}
 
-	if err := s.repo.Create(ctx, event); err != nil {
+	outboxMessage, err := s.publisher.BuildOutboxMessage(event)
+	if err != nil {
+		return CreateEventOutput{}, fmt.Errorf("build outbox message: %w", err)
+	}
+
+	if err := s.repo.CreateWithOutbox(ctx, event, outboxMessage); err != nil {
 		return CreateEventOutput{}, fmt.Errorf("save event: %w", err)
 	}
 
-	return CreateEventOutput{EventID: eventID, Status: "queued"}, nil
+	return CreateEventOutput{EventID: eventID, Status: string(domain.EventStatusPending)}, nil
 }
 
 func (s *eventService) ListEvents(ctx context.Context, input ListEventsInput) (ListEventsOutput, error) {
@@ -167,22 +175,43 @@ func (s *eventService) GetEventDetails(ctx context.Context, input GetEventDetail
 	}, nil
 }
 
+// ProcessPendingEvents публикует pending outbox-сообщения в RabbitMQ.
 func (s *eventService) ProcessPendingEvents(ctx context.Context) error {
-	events, err := s.repo.GetPending(ctx, pendingBatchLimit)
+	messages, err := s.repo.ClaimPendingOutbox(ctx, pendingBatchLimit)
 	if err != nil {
-		return fmt.Errorf("load pending events: %w", err)
+		return fmt.Errorf("claim pending outbox messages: %w", err)
 	}
 
-	for _, event := range events {
-		if err := s.publisher.PublishEvent(ctx, event); err != nil {
-			return fmt.Errorf("publish pending event %s: %w", event.EventID, err)
+	for _, message := range messages {
+		publishCtx, cancel := context.WithTimeout(ctx, outboxPublishTimeout)
+		err := s.publisher.PublishOutboxMessage(publishCtx, message)
+		cancel()
+
+		if err != nil {
+			if message.Attempts >= maxOutboxAttempts {
+				if markErr := s.repo.MarkOutboxFailed(ctx, message.ID, err.Error()); markErr != nil {
+					return fmt.Errorf("publish outbox message %s: %v; mark as failed: %w", message.ID, err, markErr)
+				}
+
+				return fmt.Errorf("publish outbox message %s: %w", message.ID, err)
+			}
+
+			if releaseErr := s.repo.ReleaseOutboxForRetry(ctx, message.ID, err.Error()); releaseErr != nil {
+				return fmt.Errorf("publish outbox message %s: %v; release for retry: %w", message.ID, err, releaseErr)
+			}
+
+			return fmt.Errorf("publish outbox message %s: %w", message.ID, err)
+		}
+
+		if err := s.repo.MarkOutboxPublished(ctx, message.ID); err != nil {
+			return fmt.Errorf("mark outbox message %s as published: %w", message.ID, err)
 		}
 	}
 
 	return nil
 }
 
-func (s *eventService) HandleNotification(ctx context.Context, eventID string) error {
+func (s *eventService) HandleNotification(ctx context.Context, eventID string) (domain.NotificationResult, error) {
 	correlationID := correlation.FromContext(ctx)
 
 	log.Printf(
@@ -191,14 +220,21 @@ func (s *eventService) HandleNotification(ctx context.Context, eventID string) e
 		eventID,
 	)
 
-	time.Sleep(100 * time.Millisecond)
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return domain.NotificationResult{}, fmt.Errorf("notification canceled: %w", ctx.Err())
+	case <-timer.C:
+	}
 
 	if rand.Intn(100) < 10 {
 		errMessage := "simulated notification failure"
 
 		attempts, err := s.repo.IncrementAttempts(ctx, eventID)
 		if err != nil {
-			return fmt.Errorf("increment attempts for event %s: %w", eventID, err)
+			return domain.NotificationResult{}, fmt.Errorf("increment attempts for event %s: %w", eventID, err)
 		}
 
 		log.Printf(
@@ -210,7 +246,7 @@ func (s *eventService) HandleNotification(ctx context.Context, eventID string) e
 
 		if attempts >= maxAttempts {
 			if err := s.repo.MarkAsFailed(ctx, eventID, errMessage); err != nil {
-				return fmt.Errorf("mark event %s as failed: %w", eventID, err)
+				return domain.NotificationResult{}, fmt.Errorf("mark event %s as failed: %w", eventID, err)
 			}
 
 			log.Printf(
@@ -219,13 +255,18 @@ func (s *eventService) HandleNotification(ctx context.Context, eventID string) e
 				eventID,
 				attempts,
 			)
+			return domain.NotificationResult{
+				Retryable: false,
+			}, fmt.Errorf("send notification for event %s: %s", eventID, errMessage)
 
 		}
-		return fmt.Errorf("send notification for event %s: %s", eventID, errMessage)
+		return domain.NotificationResult{
+			Retryable: true,
+		}, fmt.Errorf("send notification for event %s: %s", eventID, errMessage)
 	}
 
 	if err := s.repo.MarkAsSent(ctx, eventID); err != nil {
-		return fmt.Errorf("mark event %s as sent: %w", eventID, err)
+		return domain.NotificationResult{}, fmt.Errorf("mark event %s as sent: %w", eventID, err)
 	}
 
 	log.Printf(
@@ -234,6 +275,6 @@ func (s *eventService) HandleNotification(ctx context.Context, eventID string) e
 		eventID,
 	)
 
-	return nil
+	return domain.NotificationResult{}, nil
 
 }
