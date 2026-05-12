@@ -1,0 +1,320 @@
+openapi: 3.0.3
+
+info:
+  title: RabbitMQ Notification Service Practice
+  version: 1.0.0
+  description: Учебный микросервис уведомлений интернет-магазина.
+
+servers:
+  - url: http://localhost:8080
+
+paths:
+  /api/events:
+    post:
+      summary: Зарегистрировать событие заказа
+      operationId: createEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEventRequest'
+      responses:
+        '201':
+          description: Событие зарегистрировано
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateEventResponse'
+        '400':
+          description: Ошибка валидации или некорректный JSON
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    get:
+      summary: Получить список событий пользователя
+      operationId: listEvents
+      parameters:
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+          example: u1
+        - name: event_type
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - created
+              - paid
+              - shipped
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - pending
+              - sent
+              - failed
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Список событий
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EventListItem'
+        '400':
+          description: Ошибка query-параметров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/events/{event_id}:
+    get:
+      summary: Получить детальную информацию по событию
+      operationId: getEventDetails
+      parameters:
+        - name: event_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Пользователь передаётся явно, так как в проекте нет авторизации.
+      responses:
+        '200':
+          description: Детальная информация по событию
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventDetails'
+        '400':
+          description: Ошибка входных параметров
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Событие не найдено или принадлежит другому пользователю
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/admin/retry-pending:
+    post:
+      summary: Вручную запустить обработку pending-событий
+      operationId: retryPending
+      responses:
+        '200':
+          description: Pending-события отправлены на обработку
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RetryPendingResponse'
+        '500':
+          description: Внутренняя ошибка сервера
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    CreateEventRequest:
+      type: object
+      required:
+        - user_id
+        - order_id
+        - event_type
+      properties:
+        user_id:
+          type: string
+          example: u1
+        order_id:
+          type: string
+          example: o1
+        event_type:
+          type: string
+          enum:
+            - created
+            - paid
+            - shipped
+          example: created
+        payload:
+          type: object
+          additionalProperties: true
+          example:
+            source: test
+
+    CreateEventResponse:
+      type: object
+      required:
+        - event_id
+        - status
+      properties:
+        event_id:
+          type: string
+          format: uuid
+          example: 8c5a3bc0-5221-4641-80f5-5a6d56562dc9
+        status:
+          type: string
+          example: pending
+
+    EventListItem:
+      type: object
+      required:
+        - event_id
+        - order_id
+        - event_type
+        - status
+        - created_at
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+        event_type:
+          type: string
+          enum:
+            - created
+            - paid
+            - shipped
+        status:
+          type: string
+          enum:
+            - pending
+            - sent
+            - failed
+        created_at:
+          type: string
+          format: date-time
+
+    EventDetails:
+      type: object
+      required:
+        - event_id
+        - user_id
+        - order_id
+        - event_type
+        - payload
+        - status
+        - attempts
+        - created_at
+        - updated_at
+      properties:
+        event_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+        order_id:
+          type: string
+        event_type:
+          type: string
+          enum:
+            - created
+            - paid
+            - shipped
+        payload:
+          type: object
+          additionalProperties: true
+        status:
+          type: string
+          enum:
+            - pending
+            - sent
+            - failed
+        attempts:
+          type: integer
+          example: 0
+        error_message:
+          type: string
+          nullable: true
+          example: simulated notification failure
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RetryPendingResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: processed
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: validation failed
+            fields:
+              type: object
+              additionalProperties:
+                type: string
+              example:
+                user_id: required
